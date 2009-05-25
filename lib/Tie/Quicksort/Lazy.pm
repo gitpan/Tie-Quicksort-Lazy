@@ -7,18 +7,18 @@ use 5.006001;
 use strict;
 use warnings;
 
-our $VERSION = '0.02';
+our $VERSION = '0.04';
 sub DEBUG() { 0 };
 
 # object field names:
 BEGIN {
    my $i = 0;
-   for (qw/comparator array ready stack/){
+   for (qw/comparator size ready parts/){  # a coderef, then an arrayref, then an arrayref of arrayrefs.
       eval "sub $_ () {".$i++.'}'
    }
 }
 
-our $trivial = ( DEBUG ? 3 : 127 );
+our $trivial = 2 ;  # if you want to call sort you have to ask for it
 
 sub import {
 	shift; # lose package name
@@ -26,48 +26,20 @@ sub import {
         $trivial = $args{TRIVIAL} || $trivial;
 };
 
-sub Tie::Quicksort::Lazy::Stable::TIEARRAY{
-   my $obj = bless [];
-   shift; # lose package name
-   my $first = shift;
-   if ( ( ref $first ) eq 'CODE' ) {
-      $obj->[comparator] = $first
-   }else{
-      $obj->[comparator] = sub {
- DEBUG and ((defined $_[0] and defined $_[1] ) or Carp::confess "undefined arg to comparator");
- $_[0] cmp $_[1] };
-      unshift @_, $first
-   };
-   my @array = @_;
-
-   $obj->[ready] = 0;
-   $obj->[array] = \@array;
-   $obj->[stack] = [ $#array ];  # the stack contains the indices of the high ends of the unsorted partitions
-
-   return $obj;
-};
 sub TIEARRAY{
    my $obj = bless [];
    shift; # lose package name
-   my $first = shift;
-   if ( ( ref $first ) eq 'CODE' ) {
-      $obj->[comparator] = $first
+   if ( ( ref $_[0] ) eq 'CODE' ) {
+      $obj->[comparator] = shift
    }else{
       $obj->[comparator] = sub {
  DEBUG and ((defined $_[0] and defined $_[1] ) or Carp::confess "undefined arg to comparator");
  $_[0] cmp $_[1] };
-      unshift @_, $first
    };
-   my @array = @_;
 
-   for (0 .. $#array){
-      # scramble to elude the dreaded quadratic situation
-      my $rand = rand(@array);
-      @array[$_,$rand] = @array[$rand, $_];
-   };
-   $obj->[ready] = 0;
-   $obj->[array] = \@array;
-   $obj->[stack] = [ $#array ];  # the stack contains the indices of the high ends of the unsorted partitions
+   $obj->[size] = @_;
+   $obj->[ready] = [];
+   $obj->[parts] = [ [ @_ ] ];  # the stack of unsorted partitions
 
    return $obj;
 };
@@ -75,87 +47,87 @@ sub TIEARRAY{
 
 sub _sort {
    my $obj = shift;
-   my $arr = $obj->[array];
    my $comp_func = $obj->[comparator];
-   my $stack = $obj->[stack];
-   DEBUG and warn "On entering _sort, stack is [@$stack]\n";
+   for(;;){
+    my $arr = pop @{$obj->[parts]};
+    DEBUG and warn "arr is [ @$arr ]";
 
-   MAKE_PARTITION:
-   !@$stack and do {
-      require Carp;
-      Carp::confess( "OUT OF PARTITIONS");
-   };
-   my $partition_end = pop @$stack;
-   my @ThisPart = @{$arr}[0 .. $partition_end];
-   DEBUG and warn "working with partition 0 .. $partition_end [@ThisPart]\n";
-   if (@ThisPart <= $trivial ) {
-      $obj->[ready] = @ThisPart;  # size of @ThisPart
-      DEBUG and warn "trivial partition,@{[$obj->[ready]]} ready elts\n";
-      $partition_end or return;
-      DEBUG and warn "sorting block 0 .. $partition_end\n";
-      DEBUG and warn "BEFORE: [@$arr]\n";
-      @{$arr}[0 .. $partition_end] = sort { $comp_func->($a,$b) } @ThisPart;
-      DEBUG and warn " AFTER: [@$arr]\n";
+    if (@$arr == 1 ) {
+      $obj->[ready] = $arr ;
       return
-   };
-   my @HighSide = ();
-   my @LowSide = ();
+    } elsif (@$arr == 2 ) {
+      $obj->[ready] = ( $comp_func->(@$arr) > 0 ? [@$arr[1,0]] : $arr ) ;
+      return
+    } elsif (@$arr <= $trivial ) {
+      $obj->[ready] = [ sort { $comp_func->($a,$b) } @$arr ];
+      return
+    };
+    my (@HighSide, @LowSide) = ();
 
-   # by choosing the last elt as the pivot
-   # and putting equal elts on the end of the low side
-   # we get a stable sort -- which doesn't matter because
-   # we scrambled the input
-
-   my $pivot = pop @ThisPart;
-
-   while (@ThisPart) {
-      my $subject = shift @ThisPart;
-      if ($comp_func->($pivot, $subject) < 0 ){
-         # we are looking at an elt that comes after the pivot
-         push @HighSide, $subject
-      }else{
-         push @LowSide, $subject
-      };
-   };
-   @{$arr}[0 .. $partition_end] = (@LowSide, $pivot, @HighSide);
-   @HighSide and push @$stack, $#HighSide; # defer the high side
-   push @$stack, 0; # this pivot,
-   @LowSide and push @$stack, $#LowSide; # defer the low side
-   DEBUG and warn "stack now @$stack\n";
-   goto MAKE_PARTITION;
+    # by choosing a random pivot and treating equality differently
+    # when examining the before and after parts of the partition,
+    # we get stability without scrambling and without any
+    # degenerate cases, even contrived ones. (choosing the midpoint
+    # gives n*log(n) performance for sorted input, but it would be
+    # possible to contrive a quadratic case)
+ 
+    my $pivot_index = int rand @$arr;
+ 
+    my $pivot = $arr->[$pivot_index];
+ 
+    # BEFORE THE PIVOT ELT:
+    for ( splice @$arr, 0, $pivot_index ) {
+       if ($comp_func->($pivot, $_) < 0 ){
+          # we are looking at an elt that belongs after the pivot
+          push @HighSide, $_
+       }else{
+          push @LowSide, $_
+       };
+    };
+ 
+    shift @$arr;  # shift off the pivot elt
+ 
+    # AFTER THE PIVOT ELT:
+    for ( @$arr ) {
+       if ($comp_func->($pivot, $_) > 0 ){
+          # we are looking at an elt that belongs before the pivot
+          push @LowSide, $_
+       }else{
+          push @HighSide, $_
+       };
+    };
+ 
+    @HighSide and push @{$obj->[parts]}, \@HighSide; # defer the high side
+    push @{$obj->[parts]}, [$pivot]; # this pivot,
+    @LowSide and push @{$obj->[parts]}, \@LowSide; # do the low side, if any, next
+   } # for (;;)
 
 }
 
 
 sub FETCHSIZE { 
-	scalar @{ $_[0]->[array] } 
+	 $_[0]->[size] 
 }
 
 sub SHIFT {
-	# $_[0]->_sort unless $_[0]->[ready]--;
-
-#       CHECK_READY:
-#       DEBUG and warn "in SHIFT, have ",$_[0]->[ready], " ready elts\n";
-#       if ($_[0]->[ready]--){
-#           return shift(@{ $_[0]->[array] });
-#        }else{
-#           $_[0]->_sort;
-#           goto CHECK_READY;
-#        }
-
-# observing the taboo against goto, that's
-       DEBUG and warn "in SHIFT, have ",$_[0]->[ready], " ready elts\n";
-       while ( $_[0]->[ready]-- == 0){
-           $_[0]->_sort;
-       };
-       shift(@{ $_[0]->[array] });
+    my $obj = shift;
+    $obj->[size] or return undef; 
+    my $rarr = $obj->[ready];
+         
+    unless (@$rarr){
+        $obj->_sort;
+        $rarr = $obj->[ready];
+    };
+ 
+    $obj->[size]-- ; 
+    shift @$rarr;
 }
 
 *STORE = *PUSH = *UNSHIFT = *FETCH =
 *STORESIZE = *POP = *EXISTS = *DELETE =
 *CLEAR = sub {
    require Carp;
-   Carp::croak ('"shift" is the only accessor defined for a '.
+   Carp::croak ('"SHIFT"  and "FETCHSIZE" are the only methods defined for a '.
                __PACKAGE__ . " array");
 };
 
@@ -176,40 +148,27 @@ Tie::Quicksort::Lazy - a lazy quicksort with tiearray interface
   };
   
   use sort 'stable';
-  tie my @StableProducer, Tie::Quicksort::Lazy::Stable, \&comparator,  @input;
+  tie my @StableProducer, Tie::Quicksort::Lazy, \&comparator,  @input;
   ...
 
 =head1 DESCRIPTION
 
-A pure-perl lazy quicksort.  The only defined way to
+A pure-perl lazy, stable, quicksort.  The only defined way to
 access the resulting tied array is with C<shift>.
 
 Sorting is deferred until an item is required.
 
+Stability is maintained by choosing a pivot element randomly
+and treating equal elements differently in the before and
+after sections.
+
 =head2 memory use
 
-This module operates on a copy of the input array.
+This module operates on a copy of the input array, which
+becomes the initial partition.  As the partitions are divided,
+the old partitions are let go. 
 
-Internal copies are made during the partitioning process
-to greatly improve readability, instead of doing in-place
-swaps and tracking a lot of array indices.  Future releases
-of this module, if any, may do it differently.
-
-So initially the Tie::Quicksort::Lazy object will include 
-an array the size of the input array, and the first partitioning
-will use a temporary array that size too.  Later partitions will
-be smaller.  Since the first partitioning is deferred until the
-first shift operation, if we have enough memory to build the object,
-and then forget about the input, we will have enough memory to
-partition it.
-
-     tie my @LazySorted, Tie::Quicksort::Lazy get_unsorted_data();
-     while (@LazySorted) {
-          my $first = shift @LazySorted;
-          ...
-     };
-
-=head2 stability
+=head2 trivial partitions
 
 For a stable variant, tie to Tie::Quicksort::Lazy::Stable instead
 and use a stable perl sort for the trivial sort or set 
@@ -228,9 +187,9 @@ you will need to bless the first one.
 
 =head2 trivial partition
 
-A constant C<trivial> is defined which declares the size of a partition
-that we simply hand off to Perl's sort for sorting. This defaults to
-127.
+A variable C<$trivial> is defined which declares the size of a partition
+that we simply hand off to Perl's sort for sorting. by default, this is
+no longer used, but it is still available if you want it.
 
 =head1 INSPIRATION
 
@@ -256,6 +215,12 @@ Original version; created by h2xs 1.23 with options
 
 revised to use perl arrays for partitioning operations instead of a
 confusing profusion of temporary index variables
+
+=item 0.04 
+
+revised internal data structure, no longer using perl's sort for
+anything by default, no longer scrambling input due to random pivot
+element selection.
 
 =back
 

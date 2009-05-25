@@ -1,4 +1,4 @@
-Tie-Quicksort-Lazy version 0.01
+Tie-Quicksort-Lazy version 0.04
 ===============================
 Proof-of-concept for a quicksort-based lazy sorting iterator.
 
@@ -17,11 +17,8 @@ core perl
 
 COPYRIGHT AND LICENCE
 
-Put the correct copyright and licence information here.
-
 Copyright (C) 2009 by David Nicol davidnico@cpan.org
 
 This library, being free software, may be redistributed
 and/or modified under the same terms as Perl.
-
 

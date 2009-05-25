@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               Tie-Quicksort-Lazy
-version:            0.02
+version:            0.04
 abstract:           a lazy quicksort with tiearray interface
 author:
     - U-OFFICE\David <David@x-ray.at>
